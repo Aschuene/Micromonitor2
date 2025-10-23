@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Micromonitor - Register</title>
+  <style>
+    body { font-family: Arial, sans-serif; background: #ECE7D5; color: #3A5A40; }
+    .container { width: 80%; margin: auto; padding: 20px; background: #DAD7CD; border-radius: 10px; margin-top: 50px; text-align: center; }
+    input, select { padding: 10px; width: 60%; margin: 10px; border: 1px solid #3A5A40; border-radius: 5px; }
+    button { padding: 10px 15px; background-color: #588157; color: white; border: none; cursor: pointer; border-radius: 5px; }
+    button:hover { background-color: #3A5A40; }
+  </style>
+</head>
+<body>
+<div style="text-align: center; margin-top: 20px;">
+    <a href="/">← Back to Home</a>
+</div>
+<div class="container">
+    <h2>Create an Account</h2>
+    <form method="POST" action="/register">
+        <input type="text" name="username" placeholder="Username" required /><br>
+        <input type="password" name="password" placeholder="Password (min 6 characters)" required /><br>
+        <input type="password" name="confirm_password" placeholder="Confirm Password" required /><br>
+        
+        <!-- Sex Dropdown -->
+        <select name="sex">
+          <option value="">Select Sex</option>
+          <option value="Male">Male</option>
+          <option value="Female">Female</option>
+        </select><br>
+        
+        <!-- Age Dropdown populated via JavaScript -->
+        <select name="age" id="age-dropdown">
+          <option value="">Select Age (optional)</option>
+        </select><br>
+        
+        <input type="number" step="any" name="weight" placeholder="Weight in kg (optional)" /><br>
+        <input type="number" step="any" name="height" placeholder="Height in cm (optional)" /><br>
+        
+        <!-- Activity Level Dropdown -->
+        <select name="activity_level">
+          <option value="">Activity Level (optional)</option>
+          <option value="sedentary">Sedentary</option>
+          <option value="lightly_active">Lightly Active</option>
+          <option value="moderately_active">Moderately Active</option>
+          <option value="active">Active</option>
+        </select><br>
+        
+        <button type="submit">Register</button>
+    </form>
+    <p>Already have an account? <a href="/login">Log in here</a>.</p>
+</div>
+<script>
+  // Populate age dropdown options from 18 to 100
+  const ageDropdown = document.getElementById('age-dropdown');
+  for (let i = 18; i <= 100; i++) {
+    const option = document.createElement('option');
+    option.value = i;
+    option.textContent = i;
+    ageDropdown.appendChild(option);
+  }
+</script>
+</body>
+</html>

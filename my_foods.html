@@ -1,0 +1,446 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>Micromonitor - My Saved Foods</title>
+  <style>
+    body { font-family: Arial, sans-serif; background-color: #ECE7D5; color: #3A5A40; margin: 0; padding: 0; }
+    header { background-color: #A3B18A; color: white; padding: 15px; text-align: center; font-size: 24px; }
+    .container { padding: 20px; max-width: 1200px; margin: auto; }
+    a { color: #588157; text-decoration: none; display: inline-block; margin-bottom: 15px; }
+    .controls { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin-bottom: 16px; }
+    .calendar-header-grid { display: grid; grid-template-columns: repeat(7, 1fr); border: 2px solid #A3B18A; background-color: #A3B18A; color: white; }
+    .calendar-header-cell { text-align: center; padding: 8px 0; font-weight: bold; }
+    .calendar-grid { display: grid; grid-template-columns: repeat(7, 1fr); border: 2px solid #A3B18A; border-top: none; }
+    .calendar-cell { border: 1px solid #A3B18A; min-height: 120px; padding: 6px; background-color: #DAD7CD; position: relative; cursor: pointer; }
+    .calendar-cell.today { background-color: #B5C99A; border: 2px solid #344E41; }
+    .out-of-range { opacity: 0.45; pointer-events: none; }
+    .calendar-cell .date { font-weight: bold; font-size: 14px; }
+    .food-entry { font-size: 13px; margin: 2px 0; cursor: pointer; }
+    .summary { margin: 12px 0 20px; padding: 10px; background: #FAF3E0; border-radius: 8px; }
+    .summary:empty { display: none; }
+    button { background: #588157; color: white; border: none; padding: 6px 10px; border-radius: 5px; cursor: pointer; }
+    button:hover { background-color: #3A5A40; }
+    input[type="date"], input[type="text"], input[type="number"], textarea {
+      padding: 6px; border-radius: 5px; border: 1px solid #3A5A40; background: #FAF3E0;
+    }
+    /* modal */
+    #overlay { position: fixed; top:0; left:0; right:0; bottom:0; background: rgba(0,0,0,0.5); display:none; z-index: 999; }
+    #modal { display:none; position:fixed; top:50%; left:50%; transform:translate(-50%,-50%); background:white; padding:20px; border-radius:10px; box-shadow:0 0 10px rgba(0,0,0,0.3); z-index:1000; max-width: 640px; width: 95%; }
+    #modal .row { display:flex; gap:8px; margin-bottom:8px; }
+    #modal h3 { margin-top: 0; }
+    .bar { height: 10px; background:#B5C99A; border-radius: 8px; overflow: hidden; }
+    .bar > span { display:block; height:100%; background:#588157; }
+    .bar-label { font-size: 12px; display:flex; justify-content: space-between; margin-top: 4px; }
+    .charts { background:#FAF3E0; border-radius:8px; padding:12px; margin: 14px 0; display:none; }
+    .charts canvas { max-width: 100%; }
+    .inline-note { font-size: 12px; opacity: 0.8; }
+  </style>
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <header>My Saved Foods</header>
+  <div class="container">
+    <a href="/">&larr; Back to Home</a>
+
+    <div class="controls">
+      <label>From: <input type="date" id="start-date"></label>
+      <label>To: <input type="date" id="end-date"></label>
+      <button onclick="renderCalendar()">Apply Filter</button>
+      <button onclick="exportCSV()">Export CSV</button>
+      <button onclick="toggleCharts()">Show Weekly Charts</button>
+      <span class="inline-note">Tip: click a day to add/view; click a food to edit/delete.</span>
+    </div>
+
+    <div id="summary" class="summary"></div>
+
+    <div class="calendar-header-grid">
+      <div class="calendar-header-cell">Sun</div>
+      <div class="calendar-header-cell">Mon</div>
+      <div class="calendar-header-cell">Tue</div>
+      <div class="calendar-header-cell">Wed</div>
+      <div class="calendar-header-cell">Thu</div>
+      <div class="calendar-header-cell">Fri</div>
+      <div class="calendar-header-cell">Sat</div>
+    </div>
+    <div class="calendar-grid" id="calendar"></div>
+
+    <div class="charts" id="charts">
+      <h3>Weekly Charts</h3>
+      <canvas id="calChart" height="140"></canvas>
+      <canvas id="macroChart" height="160"></canvas>
+    </div>
+  </div>
+
+  <div id="overlay"></div>
+  <div id="modal">
+    <div id="modal-content"></div>
+    <div style="display:flex; gap:8px; justify-content:flex-end; margin-top: 10px;">
+      <button onclick="closeModal()">Close</button>
+    </div>
+  </div>
+
+<script>
+  let allFoods = [];
+  let dailyValues = {}; // optional — if your backend provides /calculate_nutrition
+  let chartsVisible = false, calChart, macroChart;
+
+  // Fetch DV once (optional)
+  (function fetchDailyValues(){
+    fetch('/calculate_nutrition?age=30&sex=Male&weight=70&height=170&activity_level=moderate')
+      .then(r => r.json())
+      .then(d => { dailyValues = d.recommendations || {}; })
+      .catch(()=>{});
+  })();
+
+  // Load foods, then draw
+  fetch('/my_foods')
+    .then(res => res.json())
+    .then(data => { allFoods = data.foods || []; renderCalendar(); })
+    .catch(() => { renderCalendar(); });
+
+  function isInRange(dateStr, startDate, endDate) {
+    if (startDate && dateStr < startDate) return false;
+    if (endDate && dateStr > endDate) return false;
+    return true;
+  }
+
+  function dateISO(d) { return new Date(d).toISOString().split('T')[0]; }
+
+  function renderCalendar() {
+    const calendar = document.getElementById('calendar');
+    const summaryDiv = document.getElementById('summary');
+    const startDate = document.getElementById('start-date').value;
+    const endDate = document.getElementById('end-date').value;
+    const todayStr = new Date().toISOString().split('T')[0];
+
+    const ref = startDate ? new Date(startDate) : new Date();
+    const year = ref.getFullYear(), month = ref.getMonth();
+    const firstDay = new Date(year, month, 1), lastDay = new Date(year, month + 1, 0);
+    const startOffset = firstDay.getDay(), totalDays = lastDay.getDate();
+
+    calendar.innerHTML = '';
+    let totalCalories = 0, daysWithEntries = 0;
+
+    for (let i = 0; i < startOffset; i++) {
+      const emptyCell = document.createElement('div');
+      emptyCell.className = 'calendar-cell';
+      calendar.appendChild(emptyCell);
+    }
+
+    for (let day = 1; day <= totalDays; day++) {
+      const currentDate = new Date(year, month, day);
+      const dateStr = dateISO(currentDate);
+      const inRange = isInRange(dateStr, startDate, endDate);
+      const dayFoods = allFoods.filter(f => dateISO(f.created_at) === dateStr);
+
+      const cell = document.createElement('div');
+      cell.className = 'calendar-cell';
+      if (!inRange) cell.classList.add('out-of-range');
+      if (dateStr === todayStr) cell.classList.add('today');
+      cell.innerHTML = `<div class="date">${dateStr}</div>`;
+
+      let dayCalories = 0;
+      dayFoods.forEach(food => {
+        const fDiv = document.createElement('div');
+        fDiv.className = 'food-entry';
+        fDiv.textContent = `${food.food_name} (${food.calories ?? 0} kcal)`;
+        fDiv.onclick = (e) => { e.stopPropagation(); openEditFoodModal(food); };
+        cell.appendChild(fDiv);
+        if (inRange) dayCalories += (food.calories || 0);
+      });
+
+      // Day summary + add button
+      const row = document.createElement('div');
+      row.style.display = 'flex';
+      row.style.justifyContent = 'space-between';
+      row.style.alignItems = 'center';
+      row.style.marginTop = '4px';
+      const calDiv = document.createElement('div');
+      calDiv.style.fontSize = '0.9em';
+      calDiv.textContent = (dayFoods.length ? `${dayCalories} kcal` : '');
+      const addBtn = document.createElement('button');
+      addBtn.textContent = 'Add';
+      addBtn.onclick = (e) => { e.stopPropagation(); openAddForDateModal(dateStr); };
+      row.appendChild(calDiv);
+      row.appendChild(addBtn);
+      cell.appendChild(row);
+
+      if (dayFoods.length > 0 && inRange) {
+        totalCalories += dayCalories;
+        daysWithEntries++;
+        cell.onclick = () => openDaySummaryModal(dateStr, dayFoods);
+      }
+
+      calendar.appendChild(cell);
+    }
+
+    const avgPerDay = daysWithEntries ? (totalCalories / daysWithEntries).toFixed(2) : 0;
+    const avgPerWeek = (totalCalories / 7).toFixed(2);
+    summaryDiv.innerHTML = `
+      <strong>Total Calories (In Range):</strong> ${totalCalories} kcal &nbsp;|&nbsp;
+      <strong>Avg/Day:</strong> ${avgPerDay} kcal &nbsp;|&nbsp;
+      <strong>Avg/Week:</strong> ${avgPerWeek} kcal
+    `;
+
+    if (chartsVisible) renderChartsForCurrentWeek();
+  }
+
+  function closeModal() {
+    document.getElementById('modal').style.display = 'none';
+    document.getElementById('overlay').style.display = 'none';
+  }
+  function openModal(html) {
+    document.getElementById('modal-content').innerHTML = html;
+    document.getElementById('overlay').style.display = 'block';
+    document.getElementById('modal').style.display = 'block';
+  }
+
+  // ---- Add Food for a specific date ----
+  function openAddForDateModal(dateStr) {
+    const html = `
+      <h3>Add Food for ${dateStr}</h3>
+      <div class="row"><input id="af-name" type="text" placeholder="Food name"></div>
+      <div class="row">
+        <input id="af-cal" type="number" placeholder="Calories (kcal)" style="width:50%">
+        <input id="af-qty" type="number" placeholder="Quantity" value="1" step="0.1" style="width:50%">
+      </div>
+      <div class="row"><textarea id="af-micros" rows="5" placeholder='Micronutrients JSON (e.g. [{"name":"Protein","amount":10,"unit":"g"}])' style="width:100%"></textarea></div>
+      <div style="display:flex; gap:8px; justify-content:flex-end;">
+        <button onclick="saveAddForDate('${dateStr}')">Save</button>
+      </div>
+    `;
+    openModal(html);
+  }
+  function saveAddForDate(dateStr) {
+    const name = document.getElementById('af-name').value.trim();
+    const calories = parseInt(document.getElementById('af-cal').value || 0);
+    const quantity = parseFloat(document.getElementById('af-qty').value || 1);
+    let micros = [];
+    try { micros = JSON.parse(document.getElementById('af-micros').value || "[]"); }
+    catch { return alert("Micronutrients must be valid JSON."); }
+    const payload = { food_name: name, calories, quantity, micronutrients: micros, created_at: dateStr + "T12:00" };
+    fetch('/manual_input_food', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)})
+      .then(r=>r.json())
+      .then(d=>{
+        if (d.error) return alert(d.error);
+        // Refresh
+        fetch('/my_foods').then(r=>r.json()).then(data=>{ allFoods = data.foods||[]; closeModal(); renderCalendar(); });
+      })
+      .catch(e=>alert("Error saving: " + e));
+  }
+
+  // ---- Edit/Delete a saved food ----
+  function openEditFoodModal(food) {
+    const microsJSON = JSON.stringify(food.micronutrients || [], null, 2);
+    const html = `
+      <h3>Edit Food #${food.id}</h3>
+      <div class="row"><input id="ef-name" type="text" placeholder="Food name" value="${escapeHtml(food.food_name || '')}" style="width:100%"></div>
+      <div class="row">
+        <input id="ef-cal" type="number" placeholder="Calories (kcal)" value="${food.calories ?? ''}" style="width:50%">
+        <input id="ef-qty" type="number" placeholder="Quantity" value="${food.quantity ?? 1}" step="0.1" style="width:50%">
+      </div>
+      <div class="row"><textarea id="ef-micros" rows="8" style="width:100%">${microsJSON}</textarea></div>
+      <div class="row">
+        <div style="flex:1">
+          <h4>Daily Value Progress</h4>
+          ${renderDVProgress(food)}
+        </div>
+      </div>
+      <div style="display:flex; gap:8px; justify-content:flex-end;">
+        <button onclick="doDeleteFood(${food.id})" style="background:#9a3e3e">Delete</button>
+        <button onclick="doSaveFood(${food.id})">Save</button>
+      </div>
+    `;
+    openModal(html);
+  }
+
+  function doSaveFood(foodId) {
+    const name = document.getElementById('ef-name').value.trim();
+    const calories = document.getElementById('ef-cal').value ? parseInt(document.getElementById('ef-cal').value) : null;
+    const quantity = document.getElementById('ef-qty').value ? parseFloat(document.getElementById('ef-qty').value) : null;
+    let micros = null;
+    try { micros = JSON.parse(document.getElementById('ef-micros').value || "[]"); }
+    catch { return alert("Micronutrients must be valid JSON."); }
+    fetch(`/api/foods/${foodId}`, {
+      method: 'PATCH', headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ food_name: name, calories, quantity, micronutrients: micros })
+    })
+      .then(r=>r.json())
+      .then(d=>{
+        if (d.error) return alert(d.error);
+        // Refresh
+        fetch('/my_foods').then(r=>r.json()).then(data=>{ allFoods = data.foods||[]; closeModal(); renderCalendar(); });
+      })
+      .catch(e=>alert("Error saving: " + e));
+  }
+
+  function doDeleteFood(foodId) {
+    if (!confirm("Delete this food?")) return;
+    fetch(`/api/foods/${foodId}`, { method: 'DELETE' })
+      .then(r=>r.json())
+      .then(d=>{
+        if (d.error) return alert(d.error);
+        fetch('/my_foods').then(r=>r.json()).then(data=>{ allFoods = data.foods||[]; closeModal(); renderCalendar(); });
+      })
+      .catch(e=>alert("Error deleting: " + e));
+  }
+
+  // ---- Day Summary modal with DV bars and aggregated micros ----
+  function openDaySummaryModal(dateStr, foods) {
+    const totals = aggregateFoods(foods);
+    const dvHtml = renderDVProgress({ micronutrients: totals.micros });
+    let microList = totals.micros.map(n => `<li>${n.name}: ${round(n.amount)} ${n.unit || ''}</li>`).join('');
+    if (!microList) microList = '<li>N/A</li>';
+    const html = `
+      <h3>Summary for ${dateStr}</h3>
+      <p><strong>Total Calories:</strong> ${totals.calories} kcal</p>
+      <div>${dvHtml}</div>
+      <details open>
+        <summary><strong>Aggregated Micronutrients</strong></summary>
+        <ul>${microList}</ul>
+      </details>
+    `;
+    openModal(html);
+  }
+
+  // ---- CSV Export (client-side) ----
+  function exportCSV() {
+    const rows = [["id","date","food_name","calories","quantity","nutrient_name","amount","unit"]];
+    allFoods.forEach(f=>{
+      if (!f.micronutrients || !f.micronutrients.length) {
+        rows.push([f.id, dateISO(f.created_at), f.food_name, f.calories ?? "", f.quantity ?? "", "", "", ""]);
+      } else {
+        f.micronutrients.forEach(n=>{
+          rows.push([f.id, dateISO(f.created_at), f.food_name, f.calories ?? "", f.quantity ?? "", n.name ?? "", n.amount ?? "", n.unit ?? ""]);
+        });
+      }
+    });
+    const csv = rows.map(r => r.map(escapeCsv).join(",")).join("\n");
+    const blob = new Blob([csv], {type:"text/csv;charset=utf-8;"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = "my_foods_export.csv";
+    document.body.appendChild(a); a.click(); document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  // ---- Charts (weekly) ----
+  function toggleCharts() {
+    chartsVisible = !chartsVisible;
+    document.querySelector('button[onclick="toggleCharts()"]').textContent = chartsVisible ? "Hide Weekly Charts" : "Show Weekly Charts";
+    document.getElementById('charts').style.display = chartsVisible ? "block" : "none";
+    if (chartsVisible) renderChartsForCurrentWeek();
+  }
+
+  function renderChartsForCurrentWeek() {
+    const today = new Date();
+    // last 7 days array
+    const labels = [];
+    for (let i=6;i>=0;i--) {
+      const d = new Date(today); d.setDate(today.getDate() - i);
+      labels.push(dateISO(d));
+    }
+    const seriesCal = labels.map(d => {
+      return allFoods.filter(f => dateISO(f.created_at) === d)
+        .reduce((acc, f)=> acc + (f.calories || 0), 0);
+    });
+    // quick macros from micronutrients (Protein/Fat/Carbs)
+    const macroNameMap = { protein: "Protein", fat: "Total lipid (fat)", carbs: "Carbohydrate, by difference" };
+    const macroSeries = { protein: [], fat: [], carbs: [] };
+    labels.forEach(d => {
+      const foods = allFoods.filter(f => dateISO(f.created_at) === d);
+      const totals = aggregateFoods(foods);
+      macroSeries.protein.push(safeGetN(totals.micros, macroNameMap.protein));
+      macroSeries.fat.push(safeGetN(totals.micros, macroNameMap.fat));
+      macroSeries.carbs.push(safeGetN(totals.micros, macroNameMap.carbs));
+    });
+
+    // Calories line
+    const ctx1 = document.getElementById('calChart');
+    if (calChart) calChart.destroy();
+    calChart = new Chart(ctx1, {
+      type: 'line',
+      data: { labels, datasets: [{ label: 'Calories (kcal)', data: seriesCal }] },
+      options: { responsive: true, maintainAspectRatio: false }
+    });
+
+    // Macros stacked bars
+    const ctx2 = document.getElementById('macroChart');
+    if (macroChart) macroChart.destroy();
+    macroChart = new Chart(ctx2, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [
+          { label: 'Protein (g)', data: macroSeries.protein },
+          { label: 'Fat (g)',     data: macroSeries.fat },
+          { label: 'Carbs (g)',   data: macroSeries.carbs }
+        ]
+      },
+      options: {
+        responsive: true, maintainAspectRatio: false,
+        scales: { x: { stacked:true }, y: { stacked:true } }
+      }
+    });
+  }
+
+  // ---- Helpers ----
+  function aggregateFoods(foods) {
+    let calories = 0;
+    const agg = {};
+    foods.forEach(f=>{
+      calories += (f.calories || 0);
+      (f.micronutrients || []).forEach(n=>{
+        const key = n.name || "";
+        if (!key) return;
+        const amt = parseFloat(n.amount || 0);
+        if (!agg[key]) agg[key] = { amount: 0, unit: n.unit || "" };
+        agg[key].amount += (isFinite(amt) ? amt : 0);
+      });
+    });
+    const micros = Object.keys(agg).map(k => ({ name:k, amount: agg[k].amount, unit: agg[k].unit }));
+    return { calories, micros };
+  }
+  function safeGetN(list, name) {
+    const f = list.find(x => x.name === name);
+    return f ? Number(f.amount || 0) : 0;
+  }
+  function round(x) { return Math.round((x + Number.EPSILON) * 100) / 100; }
+
+  function renderDVProgress(food) {
+    // Build macro snapshot for DV-ish bars
+    const byName = {};
+    (food.micronutrients || []).forEach(n => { byName[n.name] = n; });
+    const entries = [
+      { key: 'Energy (kcal)',      label: 'Calories (kcal)', target: dailyValues['Energy (kcal)'] || 2000, unit:'kcal' },
+      { key: 'Protein',            label: 'Protein (g)',     target: dailyValues['Protein'] || 50,        unit:'g' },
+      { key: 'Total lipid (fat)',  label: 'Fat (g)',         target: dailyValues['Total lipid (fat)'] || 78, unit:'g' },
+      { key: 'Carbohydrate, by difference', label: 'Carbs (g)', target: dailyValues['Carbohydrate, by difference'] || 275, unit:'g' },
+      { key: 'Fiber, total dietary', label: 'Fiber (g)',     target: dailyValues['Fiber, total dietary'] || 28, unit:'g' },
+      { key: 'Sodium, Na',         label: 'Sodium (mg)',     target: dailyValues['Sodium, Na'] || 2300,   unit:'mg' },
+    ];
+    let html = '';
+    entries.forEach(e=>{
+      const val = (byName[e.key] && byName[e.key].amount) ? Number(byName[e.key].amount) : 0;
+      const pct = Math.max(0, Math.min(100, e.target ? (val / e.target) * 100 : 0));
+      html += `
+        <div class="bar-label"><span>${e.label}: ${round(val)} ${e.unit}</span><span>${Math.round(pct)}%${e.target?' DV':''}</span></div>
+        <div class="bar"><span style="width:${pct}%"></span></div>
+      `;
+    });
+    return html;
+  }
+
+  function escapeHtml(s) {
+    return (s || "").toString().replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+  function escapeCsv(v) {
+    const s = (v===null||v===undefined) ? '' : String(v);
+    if (/[",\n]/.test(s)) return '"' + s.replace(/"/g,'""') + '"';
+    return s;
+  }
+</script>
+</body>
+</html>
