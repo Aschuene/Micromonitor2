@@ -116,6 +116,30 @@
       font-weight: bold;
       margin: 8px 0;
     }
+
+    /* Recipe detail panel styling */
+    #recipe-detail {
+      display:none;
+      margin-top:14px;
+      padding:14px;
+      background:#fff;
+      border-radius:10px;
+      box-shadow:0 0 8px rgba(0,0,0,.06);
+    }
+
+    /* small helper box look for recipe search */
+    .recipe-search-box {
+      background:#FAF3E0;
+      border:1px solid #3A5A40;
+      border-radius:10px;
+      padding:12px;
+      max-width:820px;
+      margin:16px auto 0 auto;
+    }
+
+    .recipe-search-inline-input {
+      max-width:260px;
+    }
   </style>
 </head>
 <body>
@@ -194,22 +218,50 @@
       <div class="btn-row">
         <button id="btn-myrecipes" onclick="getMyRecipes()">Refresh My Recipes</button>
       </div>
+
+      <!-- Recipe search -->
+      <div class="recipe-search-box">
+        <div class="btn-row" style="margin-top:0;">
+          <input
+            type="text"
+            id="recipe-search-term"
+            class="recipe-search-inline-input"
+            placeholder="Search by recipe name / text (e.g. chicken)"
+            style="width:100%;max-width:260px;"
+          >
+          <input
+            type="text"
+            id="recipe-search-nutrient"
+            class="recipe-search-inline-input"
+            placeholder="Search by micronutrient (e.g. iron)"
+            style="width:100%;max-width:260px;"
+          >
+          <button onclick="searchMyRecipes()">Search</button>
+        </div>
+        <small class="hint">Leave one blank if you only want to search by the other.</small>
+      </div>
+
       <div id="recipes-list">No recipes loaded yet.</div>
     </div>
   </div>
 
-  <!-- — Recipe detail panel (appears when a recipe is clicked) — -->
-  <div id="recipe-detail" style="display:none; margin-top:14px; padding:14px; background:#fff; border-radius:10px; box-shadow:0 0 8px rgba(0,0,0,.06);">
+  <!-- Recipe detail panel -->
+  <div id="recipe-detail"
+       data-recipe-id=""
+       style="display:none; margin-top:14px; padding:14px; background:#fff; border-radius:10px; box-shadow:0 0 8px rgba(0,0,0,.06);">
     <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
       <h4 id="recipe-detail-title" style="margin:0;"></h4>
-      <button onClick="closeRecipeDetail()">Close</button>
+      <div class="btn-row" style="margin-top:0;">
+        <button onclick="deleteRecipe()">Delete</button>
+        <button onClick="closeRecipeDetail()">Close</button>
+      </div>
     </div>
 
     <div style="margin:8px 0 12px 0; color:#4b4b; font-size:.95em;" id="recipe-detail-meta"></div>
 
     <div style="margin:10px 0;">
       <label for="rename-title"><strong>Rename recipe:</strong></label>
-      <div class="btn-row" style="justify-content:flex-start;">
+      <div class="btn-row" style="justify-content:center;">
         <input type="text" id="rename-title" placeholder="New title.." style="max-width:420px;">
         <button id="btn-rename-recipe" onClick="renameRecipe()">Save Name</button>
       </div>
@@ -219,10 +271,10 @@
 
     <div id="recipe-detail-content" style="margin-top:10px;"></div>
   </div>
-</div>
 
   <script>
     let debounceTimer;
+    let lastPreview = null; // used for food preview save
 
     // Update navigation based on current user
     fetch('/current_user')
@@ -261,33 +313,39 @@
       debounceTimer = setTimeout(searchAll, 500);
     }
 
-    // Helper to build a result list (provider: "fatsecret" | "usda")
+    // Build provider box of results
     function buildResults(container, provider, results) {
       const box = document.createElement("div");
       box.innerHTML = `<h4><span class="provider-badge">${provider.toUpperCase()}</span> results</h4>`;
       const ul = document.createElement("ul");
 
       results.forEach(item => {
+        // normalize naming so preview works even if backend uses different keys
+        const fid   = item.food_id || item.fdc_id || item.fdcId || item.id || item.foodId;
+        const fname = item.name || item.food_name || item.description || "Unnamed";
+        const fbrand= item.brand || item.brand_name || item.brandName || item.brandOwner || "";
+
         const li = document.createElement("li");
         li.className = "clickable";
-        li.textContent = `${item.name} ${item.brand ? `(${item.brand})` : ""}`;
+        li.textContent = `${fname} ${fbrand ? "(" + fbrand + ")" : ""}`;
 
-        // Inline preview slot directly under this item
         const slot = document.createElement("div");
         slot.className = "inline-preview";
         slot.style.display = "none";
 
         li.onclick = () => {
-          // toggle if already open
+          // toggle if open
           if (slot.style.display === "block") {
-            slot.style.display = "none"; slot.innerHTML = "";
+            slot.style.display = "none";
+            slot.innerHTML = "";
             return;
           }
-          // close others in this UL
+          // close others
           Array.from(ul.querySelectorAll(".inline-preview")).forEach(p => {
-            p.style.display = "none"; p.innerHTML = "";
+            p.style.display = "none";
+            p.innerHTML = "";
           });
-          previewDetail(provider, item.food_id, item.name, slot);
+          previewDetail(provider, fid, fname, slot);
         };
 
         ul.appendChild(li);
@@ -298,9 +356,13 @@
       container.appendChild(box);
     }
 
+    // Unified search across FatSecret + USDA
     function searchAll() {
       const query = document.getElementById("search-food").value.trim();
-      if (!query) { alert("Please enter a food name."); return; }
+      if (!query) {
+        alert("Please enter a food name.");
+        return;
+      }
       const out = document.getElementById("search-results");
       out.innerHTML = "Searching…";
 
@@ -309,33 +371,39 @@
         .then(data => {
           out.innerHTML = "";
 
-          // FatSecret
+          // ----- FATSECRET -----
           if (data.fatsecret) {
-            if (data.fatsecret.error) {
-              const e = document.createElement("p");
-              e.textContent = `FatSecret error: ${data.fatsecret.error}`;
-              out.appendChild(e);
-            } else {
-              const results = (data.fatsecret.data && data.fatsecret.data.results) || [];
-              if (results.length) buildResults(out, "fatsecret", results);
+            let fsResults = [];
+            if (Array.isArray(data.fatsecret.results)) {
+              fsResults = data.fatsecret.results;
+            } else if (data.fatsecret.data && Array.isArray(data.fatsecret.data.results)) {
+              fsResults = data.fatsecret.data.results;
+            }
+            if (fsResults.length) {
+              buildResults(out, "fatsecret", fsResults);
             }
           }
 
-          // USDA API (show). USDA_LOCAL (CSV) -> do not render, can enrich silently
+          // ----- USDA (LOCAL OR API) -----
           const usda = data.usda;
-          if (usda && usda.source === "USDA_API") {
+          if (usda) {
             const results = (usda.data && usda.data.results) || [];
-            if (results.length) buildResults(out, "usda", results);
-          } else if (usda && usda.source === "USDA_LOCAL") {
-            try {
-              const results = (usda.data && usda.data.results) || [];
-              if (results.length) {
-                fetch(`/api/usda_enrich?name=${encodeURIComponent(results[0].name)}`).catch(()=>{});
+            if (results.length) {
+              buildResults(out, "usda", results);
+
+              // If source is local, still trigger enrich in background
+              if (usda.source === "USDA_LOCAL") {
+                try {
+                  fetch(`/api/usda_enrich?name=${encodeURIComponent(results[0].name || results[0].food_name || "")}`)
+                    .catch(()=>{});
+                } catch(e) {}
               }
-            } catch(e) {}
+            }
           }
 
-          if (!out.innerText.trim()) out.innerHTML = "<p>No results found.</p>";
+          if (!out.innerText.trim()) {
+            out.innerHTML = "<p>No results found.</p>";
+          }
         })
         .catch(err => {
           console.error("Error during search:", err);
@@ -343,7 +411,7 @@
         });
     }
 
-    // --- Preview then Save ---
+    // Preview + save flow for foods
     const SEVEN_MAIN = [
       'Protein',
       'Total lipid (fat)',
@@ -353,8 +421,6 @@
       'Calcium, Ca',
       'Iron, Fe'
     ];
-
-    let lastPreview = null; // {provider, id, name, detail, slotEl}
 
     function previewDetail(provider, id, fallbackName, slotEl) {
       fetch(`/api/food_detail?provider=${encodeURIComponent(provider)}&id=${encodeURIComponent(id)}&preview=1`)
@@ -367,7 +433,7 @@
           const energy = (detail.nutrition && detail.nutrition.calories) ?? "N/A";
           const micros = detail.foodNutrients || detail.micronutrients || [];
 
-          // Split nutrients into 7-main and others (case-insensitive match)
+          // Split nutrients
           const main = [];
           const others = [];
           const mapName = n => (n.name || "").trim();
@@ -424,7 +490,7 @@
         .catch(e => alert("Error saving food: " + e));
     }
 
-    // --- Manual Food Input: parse + submit ---
+    // Manual text parsing / submit
     function parseFoodText() {
       const text = document.getElementById("manual-food-plaintext").value;
       if (!text) return alert("Please enter a food description in plain text.");
@@ -477,12 +543,20 @@
       .catch(err => console.error("Error in manual input:", err));
     }
 
-    // --- Recipes: create + list (rename handled server-side endpoints) ---
+    // Recipes: create / list / search / open / rename / delete
     function createRecipeFromPlaintext() {
       if (!startBusy("btn-generate-recipe", "Generating…")) return;
       const text = document.getElementById("recipe-plaintext").value;
       if (!text) { alert("Please enter a description for the recipe."); endBusy("btn-generate-recipe"); return; }
-      const payload = { title: "Generated Recipe", ingredients: "", micronutrients: [], preferences: text, generative: true };
+
+      const payload = {
+        title: "Generated Recipe",
+        ingredients: "",
+        micronutrients: [],
+        preferences: text,
+        generative: true
+      };
+
       fetch('/api/recipes', {
         method: 'POST', headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(payload)
@@ -518,24 +592,71 @@
         .catch(err=>console.error("Error loading recipes:", err));
     }
 
-    // --- Image scan (placeholder-friendly) ---
-    
-    // ========== Recipe detail helpers & actions ==========
+    function searchMyRecipes() {
+      const termEl = document.getElementById("recipe-search-term");
+      const nutEl  = document.getElementById("recipe-search-nutrient");
+
+      const termVal = termEl ? termEl.value.trim() : "";
+      const nutVal  = nutEl ? nutEl.value.trim() : "";
+
+      const params = new URLSearchParams();
+      if (termVal) params.append("term", termVal);
+      if (nutVal)  params.append("nutrient", nutVal);
+
+      const div = document.getElementById("recipes-list");
+      div.textContent = "Searching...";
+
+      fetch("/api/recipes/search?" + params.toString())
+        .then(r => r.json())
+        .then(data => {
+          div.innerHTML = "";
+          if (data.error) {
+            div.textContent = "Error: " + data.error;
+            return;
+          }
+          const arr = data.recipes || [];
+          if (!arr.length) {
+            div.textContent = "No matching recipes.";
+            return;
+          }
+          arr.forEach(rcp => {
+            const row = document.createElement("div");
+            row.style.padding = "6px 0";
+            row.style.borderBottom = "1px solid #e6e6e6";
+            row.innerHTML = `<div class="clickable" style="text-align:left;"><strong>${rcp.title}</strong> — ${rcp.created_at || ''}</div>`;
+            row.onclick = () => openRecipe(rcp.id || rcp.recipe_id || rcp);
+            div.appendChild(row);
+          });
+        })
+        .catch(err => {
+          console.error("searchMyRecipes error", err);
+          div.textContent = "Search failed.";
+        });
+    }
+
     function renderRecipeDetail(recipe) {
       const panel = document.getElementById("recipe-detail");
       const titleEl = document.getElementById("recipe-detail-title");
       const metaEl  = document.getElementById("recipe-detail-meta");
       const bodyEl  = document.getElementById("recipe-detail-content");
+      const renameInput = document.getElementById("rename-title");
 
-      panel.dataset.recipeId = recipe.id || recipe.recipe_id;
+      panel.dataset.recipeId = recipe.id || recipe.recipe_id || "";
 
       titleEl.textContent = recipe.title || "Untitled recipe";
       metaEl.textContent  = recipe.created_at ? `Created — ${recipe.created_at}` : "";
 
+      if (renameInput) {
+        renameInput.value = recipe.title || "";
+      }
+
       if (recipe.content_html) {
         bodyEl.innerHTML = recipe.content_html;
       } else if (recipe.content) {
-        bodyEl.innerHTML = `<pre>${typeof recipe.content === "string" ? recipe.content : JSON.stringify(recipe.content, null, 2)}</pre>`;
+        bodyEl.innerHTML = `<pre>${typeof recipe.content === "string"
+          ? recipe.content
+          : JSON.stringify(recipe.content, null, 2)
+        }</pre>`;
       } else {
         const ing  = recipe.ingredients ? `<h5>Ingredients</h5><pre>${recipe.ingredients}</pre>` : "";
         const instr= recipe.instructions ? `<h5>Instructions</h5><pre>${recipe.instructions}</pre>` : "";
@@ -545,16 +666,6 @@
 
       panel.style.display = "block";
       panel.scrollIntoView({behavior:"smooth", block:"start"});
-    }
-
-    function closeRecipeDetail() {
-      const panel = document.getElementById("recipe-detail");
-      panel.style.display = "none";
-      panel.removeAttribute("data-recipe-id");
-      document.getElementById("recipe-detail-content").innerHTML = "";
-      document.getElementById("recipe-detail-meta").textContent = "";
-      const rti = document.getElementById("rename-title");
-      if (rti) rti.value = "";
     }
 
     async function openRecipe(idOrObj) {
@@ -626,7 +737,48 @@
         alert(msg || "Rename failed (no matching endpoint).");
       }
     }
-function scanFoodImage() {
+
+    function deleteRecipe() {
+      const panel = document.getElementById("recipe-detail");
+      const rid = panel.dataset.recipeId;
+      if (!rid) {
+        alert("No recipe selected.");
+        return;
+      }
+      if (!confirm("Really delete this recipe? This can't be undone.")) {
+        return;
+      }
+
+      fetch(`/api/recipes/${encodeURIComponent(rid)}`, {
+        method: "DELETE"
+      })
+      .then(r => r.json())
+      .then(d => {
+        if (d.ok) {
+          closeRecipeDetail();
+          getMyRecipes();
+        } else {
+          alert(d.error || "Delete failed.");
+        }
+      })
+      .catch(err => {
+        console.error("Error deleting recipe:", err);
+        alert("Error deleting recipe.");
+      });
+    }
+
+    function closeRecipeDetail() {
+      const panel = document.getElementById("recipe-detail");
+      panel.style.display = "none";
+      panel.dataset.recipeId = "";
+      document.getElementById("recipe-detail-content").innerHTML = "";
+      document.getElementById("recipe-detail-meta").textContent = "";
+      const rti = document.getElementById("rename-title");
+      if (rti) rti.value = "";
+    }
+
+    // Image scan
+    function scanFoodImage() {
       const file = document.getElementById("food-image").files[0];
       if (!file) return alert("Please select an image file.");
       if (!startBusy("btn-image-scan", "Scanning…")) return;
@@ -662,7 +814,7 @@ function scanFoodImage() {
         .finally(() => endBusy("btn-image-scan"));
     }
 
-    // --- Saved foods helper (kept for inline section) ---
+    // Saved foods list
     function getMyFoods() {
       fetch('/my_foods')
       .then(r => r.json())
@@ -685,6 +837,10 @@ function scanFoodImage() {
       })
       .catch(err => console.error("Error fetching saved foods:", err));
     }
+
+    // initial load
+    getMyFoods();
+    getMyRecipes();
   </script>
 </body>
 </html>
