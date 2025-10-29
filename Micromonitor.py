@@ -30,6 +30,16 @@ import atexit
 import torch
 from sentence_transformers import SentenceTransformer
 
+
+print("\n=== Micromonitor Environment Check ===")
+print(f"USDA Local Dir: {os.getenv('USDA_ALLDATA_DIR', '(not set)')}")
+print(f"USDA_API_KEY: {'✅ Set' if os.getenv('USDA_API_KEY') else '❌ Missing'}")
+print(f"USE_USDA_LOCAL_FIRST: {os.getenv('USE_USDA_LOCAL_FIRST', '(default 1)')}")
+print(f"FATSECRET_KEY: {'✅ Set' if os.getenv('FATSECRET_KEY') else '❌ Missing'}")
+print(f"FATSECRET_SECRET: {'✅ Set' if os.getenv('FATSECRET_SECRET') else '❌ Missing'}")
+print("=======================================\n")
+
+
 # ---------- ENV ----------
 DB_URL   = os.getenv("DATABASE_URL", "postgresql://postgres:postgres@localhost:5432/micromonitor")
 USDA_KEY = os.getenv("USDA_API_KEY")
