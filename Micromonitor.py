@@ -887,52 +887,128 @@ def search_all(query: str):
     query = (query or "").strip()
     resp = {"fatsecret": None, "usda": None}
 
-    # ---------- FatSecret (best-effort) ----------
+    # ---------- FatSecret ----------
     try:
-        results = []
-        err = None
-        # YOUR existing FatSecret search helper here; fill results as list of
-        # { "food_id": <str|int>, "name": "<name>", "brand": "<brand or ''>" }
-        # Example:
-        # results = fatsecret_search_normalized(query)  # <- implement/keep existing
-        resp["fatsecret"] = {"data": {"results": results}, "error": err}
-    except Exception as e:
-        resp["fatsecret"] = {"data": {"results": []}, "error": str(e)}
+        # fs_search() should already be available in your file.
+        # It should return something like:
+        # { "results": [ { "food_id":..., "name":..., "brand":...}, ... ],
+        #   "count": N }
+        fs_norm = fs_search(query, limit=10, page=0)
+        fs_results_raw = fs_norm.get("results", []) if fs_norm else []
 
-    # ---------- USDA API (always try; UI only shows if source == "USDA_API") ----------
-    try:
-        api_key = os.getenv("USDA_API_KEY", "")
-        usda_err = None
-        usda_results = []
-        if api_key:
-            r = requests.get(
-                "https://api.nal.usda.gov/fdc/v1/foods/search",
-                params={"api_key": api_key, "query": query, "pageSize": 10},
-                timeout=10,
-            )
-            if r.status_code == 200:
-                j = r.json() or {}
-                foods = j.get("foods") or []
-                for f in foods:
-                    usda_results.append({
-                        "food_id": f.get("fdcId"),
-                        "name": f.get("description"),
-                        "brand": (f.get("brandOwner") or "")[:80]
-                    })
-            else:
-                usda_err = f"USDA http {r.status_code}"
-        else:
-            usda_err = "USDA_API_KEY not set"
+        # Force each result to match the front-end expectation
+        fatsecret_results = []
+        for item in fs_results_raw:
+            fatsecret_results.append({
+                "food_id": item.get("food_id") or item.get("id"),
+                "name": item.get("name") or item.get("food_name") or "",
+                "brand": item.get("brand") or item.get("brand_name") or item.get("brandOwner") or ""
+            })
 
-        resp["usda"] = {
-            "source": "USDA_API",                 # <-- IMPORTANT FOR THE UI
-            "data": {"results": usda_results},
-            "error": usda_err
+        resp["fatsecret"] = {
+            "data": { "results": fatsecret_results },
+            "error": None
         }
     except Exception as e:
-        resp["usda"] = {"source": "USDA_API", "data": {"results": []}, "error": str(e)}
+        resp["fatsecret"] = {
+            "data": { "results": [] },
+            "error": f"FatSecret error: {e}"
+        }
+
+    # ---------- USDA (local first, API fallback) ----------
+    try:
+        usda_results_all = []
+        usda_err = None
+        usda_source = None
+
+        # 1. Try local CSV search first if enabled
+        if USE_USDA_LOCAL_FIRST:
+            try:
+                # usda_local_search() should return:
+                # { "results": [ { ... }, ... ], "count": N }
+                local_norm = usda_local_search(query, limit=10)
+                local_raw = local_norm.get("results", []) if local_norm else []
+
+                if local_raw:
+                    usda_source = "USDA_LOCAL"
+                    for item in local_raw:
+                        usda_results_all.append({
+                            "food_id": (
+                                item.get("food_id")
+                                or item.get("fdc_id")
+                                or item.get("fdcId")
+                                or item.get("id")
+                            ),
+                            "name": (
+                                item.get("name")
+                                or item.get("food_name")
+                                or item.get("description")
+                                or ""
+                            ),
+                            "brand": (
+                                item.get("brand")
+                                or item.get("brand_name")
+                                or item.get("brandOwner")
+                                or ""
+                            )
+                        })
+            except Exception as ee:
+                usda_err = f"local USDA error: {ee}"
+
+        # 2. If we didn't get anything local, try API
+        if not usda_results_all:
+            try:
+                api_norm = usda_search_api(query, size=10, page=1)  # you already have this helper
+                api_raw = api_norm.get("results", []) if api_norm else []
+
+                if api_raw:
+                    usda_source = "USDA_API"
+                    for item in api_raw:
+                        usda_results_all.append({
+                            "food_id": (
+                                item.get("food_id")
+                                or item.get("fdc_id")
+                                or item.get("fdcId")
+                                or item.get("id")
+                            ),
+                            "name": (
+                                item.get("name")
+                                or item.get("food_name")
+                                or item.get("description")
+                                or ""
+                            ),
+                            "brand": (
+                                item.get("brand")
+                                or item.get("brand_name")
+                                or item.get("brandOwner")
+                                or ""
+                            )
+                        })
+            except Exception as ee2:
+                if usda_err:
+                    usda_err += f" | api USDA error: {ee2}"
+                else:
+                    usda_err = f"api USDA error: {ee2}"
+
+        # Fall back label if we never set it
+        if not usda_source:
+            usda_source = "USDA_LOCAL"
+
+        resp["usda"] = {
+            "source": usda_source,
+            "data": { "results": usda_results_all },
+            "error": usda_err
+        }
+
+    except Exception as e:
+        resp["usda"] = {
+            "source": "USDA_LOCAL",
+            "data": { "results": [] },
+            "error": str(e)
+        }
 
     return jsonify(resp)
+
 
 @app.get("/api/search_aggregate")
 def api_search_aggregate():
@@ -1320,6 +1396,53 @@ def my_recipes():
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+@app.get("/api/recipes/search")
+@login_required
+def search_my_recipes():
+    """
+    Search the current user's recipes.
+    Query params:
+      term=        (matches title or content)
+      nutrient=    (matches content string, e.g. 'iron', 'vitamin c')
+    If both are provided, both must match.
+    """
+    user_id = session.get("user_id")
+
+    term      = (request.args.get("term") or "").strip().lower()
+    nutrient  = (request.args.get("nutrient") or "").strip().lower()
+
+    try:
+        with db_conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                SELECT id, title, content, web_link, generative, created_at
+                  FROM public.recipes
+                 WHERE user_id = %s
+              ORDER BY created_at DESC
+            """, (user_id,))
+            rows = cur.fetchall()
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+    def matches(r):
+        text_title = (r.get("title")   or "").lower()
+        text_body  = (r.get("content") or "").lower()
+
+        # name / general text match
+        if term:
+            if term not in text_title and term not in text_body:
+                return False
+
+        # micronutrient match (also just substring in body for now)
+        if nutrient:
+            if nutrient not in text_body:
+                return False
+
+        return True
+
+    filtered = [r for r in rows if matches(r)]
+
+    return jsonify({"recipes": filtered})
+
 # Optional: comments
 @app.post("/api/recipes/<int:recipe_id>/comments")
 @login_required
@@ -1440,6 +1563,36 @@ def post_recipe_rename():
         return jsonify({"error": "Recipe not found or not owned by this user"}), 404
     return jsonify({"ok": True, "recipe": row})
 
+
+@app.route("/api/recipes/<int:recipe_id>", methods=["DELETE"])
+def delete_recipe(recipe_id: int):
+    """
+    Delete a recipe owned by the current user.
+    Returns {ok: True} if deleted, 404 if not found / not owned.
+    """
+    user_id = _current_user_id_or_401()
+
+    try:
+        conn = _get_db_conn()
+        with conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
+            cur.execute("""
+                DELETE FROM public.recipes
+                 WHERE id = %s AND user_id = %s
+             RETURNING id
+            """, (recipe_id, user_id))
+            row = cur.fetchone()
+        conn.commit()
+    except Exception as e:
+        return jsonify({"error": f"DB error: {e}"}), 500
+    finally:
+        try:
+            conn.close()
+        except Exception:
+            pass
+
+    if not row:
+        return jsonify({"error": "Recipe not found or not owned by this user"}), 404
+    return jsonify({"ok": True})
 
 # ---------- Text parsing with llama.cpp ----------
 @app.route('/parse_food_text', methods=['POST'])
@@ -1567,7 +1720,8 @@ atexit.register(_cleanup_llm)
 # ---------- Main ----------
 if __name__ == "__main__":
     ensure_usda_loaded()  # optional: prints local USDA summary
-    # Turn OFF the reloader to avoid double-initialization of llama.cpp
+    ensure_schema() #Needed for schema validation
+# Turn OFF the reloader to avoid double-initialization of llama.cpp
     app.run(host="0.0.0.0",
             port=int(os.getenv("PORT", "5000")),
             debug=False,
