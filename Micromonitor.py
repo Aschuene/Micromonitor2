@@ -99,20 +99,50 @@ def ensure_schema():
 ensure_schema()
 
 # ---------- CACHE ----------
-def cache_get(cache_key: str) -> Tuple[Dict|None, Dict|None]:
+def _coerce_ttl(val) -> float:
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return 0.0
+
+def _coerce_dt(val) -> datetime.datetime:
+    if isinstance(val, datetime.datetime):
+        dt = val
+    else:
+        # handle text from DB (e.g., '2025-10-31 14:07:21+00' or ISO)
+        try:
+            dt = datetime.datetime.fromisoformat(str(val).replace("Z", "+00:00"))
+        except Exception:
+            dt = datetime.datetime.utcnow()
+    # compare as naive UTC
+    if dt.tzinfo:
+        dt = dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+    return dt
+
+def cache_get(cache_key: str) -> Tuple[Optional[Dict], Optional[Dict]]:
     with db_conn() as conn, conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor) as cur:
         cur.execute("""
             SELECT payload, normalized, updated_at, ttl_seconds
-              FROM api_cache WHERE cache_key=%s
+            FROM api_cache
+            WHERE cache_key=%s
         """, (cache_key,))
         row = cur.fetchone()
-        if not row: return None, None
-        age = (datetime.datetime.utcnow() - row["updated_at"].replace(tzinfo=None)).total_seconds()
-        if age > row["ttl_seconds"]:
-            return None, None
-        return row["payload"], row["normalized"]
 
-def cache_put(cache_key: str, payload: Dict, normalized: Dict|None, ttl_seconds: int = 86400):
+    if not row:
+        return None, None
+
+    updated = _coerce_dt(row["updated_at"])
+    age = (datetime.datetime.utcnow() - updated).total_seconds()
+    ttl = _coerce_ttl(row.get("ttl_seconds"))
+
+    if ttl <= 0 or age > ttl:
+        return None, None
+
+    return row["payload"], row["normalized"]
+
+def cache_put(cache_key: str, payload: Dict,
+              normalized: Optional[Dict], ttl_seconds: int = 86400):
+    ttl_int = int(ttl_seconds) if ttl_seconds is not None else 0
     with db_conn() as conn, conn.cursor() as cur:
         cur.execute("""
             INSERT INTO api_cache (cache_key, payload, normalized, ttl_seconds)
@@ -122,8 +152,14 @@ def cache_put(cache_key: str, payload: Dict, normalized: Dict|None, ttl_seconds:
                 normalized=EXCLUDED.normalized,
                 ttl_seconds=EXCLUDED.ttl_seconds,
                 updated_at=now()
-        """, (cache_key, json.dumps(payload), json.dumps(normalized) if normalized else None, ttl_seconds))
-
+        """, (
+            cache_key,
+            json.dumps(payload),
+            json.dumps(normalized) if normalized is not None else None,
+            ttl_int
+        ))
+        conn.commit()
+                
 # ---------- NORMALIZERS ----------
 def _num(v):
     try: return float(v)
