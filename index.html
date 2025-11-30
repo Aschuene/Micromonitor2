@@ -53,7 +53,6 @@
       display: block;
     }
 
-    /* Centered button rows */
     .btn-row {
       display: flex;
       justify-content: center;
@@ -72,9 +71,8 @@
     }
     button:hover:enabled { background-color: #3A5A40; }
 
-    /* Content boxes */
     #search-results, #image-scan-results, #my-foods, #recipes-list,
-    #parsed-food-output, #plaintext-recipe-output {
+    #parsed-food-output, #plaintext-recipe-output, #chat-answer {
       margin-top: 16px;
       padding: 12px;
       background: white;
@@ -85,7 +83,6 @@
     .clickable { cursor:pointer; }
     small.hint { display:block; margin-top:6px; opacity:.8; text-align:center; }
 
-    /* Inline preview under a clicked result */
     .inline-preview {
       margin: 8px 0 16px 18px;
       padding: 10px 12px;
@@ -117,7 +114,6 @@
       margin: 8px 0;
     }
 
-    /* Recipe detail panel styling */
     #recipe-detail {
       display:none;
       margin-top:14px;
@@ -127,7 +123,6 @@
       box-shadow:0 0 8px rgba(0,0,0,.06);
     }
 
-    /* small helper box look for recipe search */
     .recipe-search-box {
       background:#FAF3E0;
       border:1px solid #3A5A40;
@@ -137,8 +132,30 @@
       margin:16px auto 0 auto;
     }
 
-    .recipe-search-inline-input {
-      max-width:260px;
+    .recipe-search-inline-input { max-width:260px; }
+
+    /* segmented buttons (used for date range selector) */
+    .seg-btn{
+      border:1px solid #3F2A1A;
+      background:#5C4033;
+      color:#FAF3E0;
+      padding:6px 10px;
+      border-radius:8px;
+      cursor:pointer;
+    }
+    .seg-btn.seg-on{
+      background:#8da88f;
+      color:#fff;
+      border-color:#6b826d;
+    }
+    #win-select{flex-wrap:wrap}
+
+    .star {
+      font-size: 20px;
+      cursor: pointer;
+      user-select: none;
+      margin-left: 6px;
+      color: #C07F00;
     }
   </style>
 </head>
@@ -152,6 +169,7 @@
   </div>
 
   <div class="container">
+
     <!-- Unified Search Section -->
     <div class="section" id="unified-search">
       <h3>Unified Food Search</h3>
@@ -172,11 +190,21 @@
         <button id="btn-parse" onclick="parseFoodText()">Parse Text to JSON</button>
       </div>
       <div id="parsed-food-output"></div>
+
+      <!-- tiny debug panel for RAG context usage -->
+      <div id="parse-debug" class="inline-preview" style="display:none;">
+        <strong>Debug context used:</strong>
+        <div id="parse-debug-text" style="font-size:0.9em; opacity:0.85;">–</div>
+      </div>
+
       <hr>
       <input type="text" id="manual-food-name" placeholder="Food Name">
       <input type="number" id="manual-calories" placeholder="Calories">
       <input type="number" id="manual-quantity" placeholder="Quantity" value="1">
       <input type="datetime-local" id="manual-created-at" placeholder="Date and Time">
+      <small class="hint">
+        Choose the exact day and time this food should be saved for (defaults to now; you can pick a different day).
+      </small>
       <textarea id="manual-micronutrients" placeholder='Micronutrients as JSON (e.g., [{"name": "Protein", "amount": 10, "unit": "g"}])'></textarea>
       <div class="btn-row">
         <button id="btn-manual-save" onclick="manualInputFood()">Submit Manual Food Input</button>
@@ -198,6 +226,13 @@
       <h3>Generate Recipe from Plain Text</h3>
       <textarea id="recipe-plaintext" placeholder="Describe the recipe you want..."></textarea>
       <div class="btn-row">
+        <div id="win-select" style="display:flex;gap:8px;align-items:center;margin-right:8px;">
+          <button type="button" class="seg-btn seg-on" id="win-today"  data-range="day"   title="Use today's intake">Today</button>
+          <button type="button" class="seg-btn" id="win-week"   data-range="week"  title="Use past 7 days">This Week</button>
+          <button type="button" class="seg-btn" id="win-month"  data-range="month" title="Use this month">This Month</button>
+          <button type="button" class="seg-btn" id="win-custom" data-range="week"  title="Pick a date below">Custom</button>
+          <input type="date" id="win-date" style="display:none;" />
+        </div>
         <button id="btn-generate-recipe" onclick="createRecipeFromPlaintext()">Generate Recipe</button>
       </div>
       <div id="plaintext-recipe-output"></div>
@@ -243,6 +278,17 @@
 
       <div id="recipes-list">No recipes loaded yet.</div>
     </div>
+
+    <!-- Nutrition Q&A Chat Section -->
+    <div class="section" id="nutrition-chat">
+      <h3>Nutrition Q&amp;A</h3>
+      <textarea id="chat-question" placeholder="Ask the assistant a nutrition question (e.g., 'How can I increase my iron intake with my saved foods?')"></textarea>
+      <div class="btn-row">
+        <button id="btn-chat" onclick="askNutrition()">Ask</button>
+      </div>
+      <div id="chat-answer"></div>
+    </div>
+
   </div>
 
   <!-- Recipe detail panel -->
@@ -252,6 +298,7 @@
     <div style="display:flex; justify-content:space-between; align-items:center; gap:10px; flex-wrap:wrap;">
       <h4 id="recipe-detail-title" style="margin:0;"></h4>
       <div class="btn-row" style="margin-top:0;">
+        <span id="detail-star" class="star" title="Favorite">☆</span>
         <button onclick="deleteRecipe()">Delete</button>
         <button onClick="closeRecipeDetail()">Close</button>
       </div>
@@ -274,9 +321,10 @@
 
   <script>
     let debounceTimer;
-    let lastPreview = null; // used for food preview save
+    let lastPreview = null;
+    let favoriteSet = new Set();
 
-    // Update navigation based on current user
+    // login status
     fetch('/current_user')
       .then(r => r.json())
       .then(d => {
@@ -287,7 +335,6 @@
       })
       .catch(() => {});
 
-    // --- Busy-state helpers ---
     function startBusy(btnId, text="Working…") {
       const btn = document.getElementById(btnId);
       if (!btn || btn.disabled) return false;
@@ -307,20 +354,27 @@
       btn.style.cursor = "";
     }
 
-    // --- Debounced search ---
+    // default created_at to now for manual input
+    (function initManualCreatedAt(){
+      const dt = document.getElementById('manual-created-at');
+      if (dt && !dt.value) {
+        const now = new Date();
+        const iso = now.toISOString().slice(0,16); // YYYY-MM-DDTHH:MM
+        dt.value = iso;
+      }
+    })();
+
     function debouncedSearchAll() {
       clearTimeout(debounceTimer);
       debounceTimer = setTimeout(searchAll, 500);
     }
 
-    // Build provider box of results
     function buildResults(container, provider, results) {
       const box = document.createElement("div");
       box.innerHTML = `<h4><span class="provider-badge">${provider.toUpperCase()}</span> results</h4>`;
       const ul = document.createElement("ul");
 
       results.forEach(item => {
-        // normalize naming so preview works even if backend uses different keys
         const fid   = item.food_id || item.fdc_id || item.fdcId || item.id || item.foodId;
         const fname = item.name || item.food_name || item.description || "Unnamed";
         const fbrand= item.brand || item.brand_name || item.brandName || item.brandOwner || "";
@@ -334,13 +388,11 @@
         slot.style.display = "none";
 
         li.onclick = () => {
-          // toggle if open
           if (slot.style.display === "block") {
             slot.style.display = "none";
             slot.innerHTML = "";
             return;
           }
-          // close others
           Array.from(ul.querySelectorAll(".inline-preview")).forEach(p => {
             p.style.display = "none";
             p.innerHTML = "";
@@ -356,7 +408,6 @@
       container.appendChild(box);
     }
 
-    // Unified search across FatSecret + USDA
     function searchAll() {
       const query = document.getElementById("search-food").value.trim();
       if (!query) {
@@ -371,7 +422,6 @@
         .then(data => {
           out.innerHTML = "";
 
-          // ----- FATSECRET -----
           if (data.fatsecret) {
             let fsResults = [];
             if (Array.isArray(data.fatsecret.results)) {
@@ -384,14 +434,12 @@
             }
           }
 
-          // ----- USDA (LOCAL OR API) -----
           const usda = data.usda;
           if (usda) {
             const results = (usda.data && usda.data.results) || [];
             if (results.length) {
               buildResults(out, "usda", results);
 
-              // If source is local, still trigger enrich in background
               if (usda.source === "USDA_LOCAL") {
                 try {
                   fetch(`/api/usda_enrich?name=${encodeURIComponent(results[0].name || results[0].food_name || "")}`)
@@ -411,7 +459,6 @@
         });
     }
 
-    // Preview + save flow for foods
     const SEVEN_MAIN = [
       'Protein',
       'Total lipid (fat)',
@@ -433,7 +480,6 @@
           const energy = (detail.nutrition && detail.nutrition.calories) ?? "N/A";
           const micros = detail.foodNutrients || detail.micronutrients || [];
 
-          // Split nutrients
           const main = [];
           const others = [];
           const mapName = n => (n.name || "").trim();
@@ -490,16 +536,34 @@
         .catch(e => alert("Error saving food: " + e));
     }
 
-    // Manual text parsing / submit
     function parseFoodText() {
       const text = document.getElementById("manual-food-plaintext").value;
       if (!text) return alert("Please enter a food description in plain text.");
+
+      const dbg = document.getElementById("parse-debug");
+      const dbgText = document.getElementById("parse-debug-text");
+      if (dbg) dbg.style.display = "none";
+      if (dbgText) dbgText.textContent = "–";
+
       fetch('/parse_food_text', {
-        method: 'POST', headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({text})
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ text })
       })
-      .then(r => r.json())
-      .then(data => {
+      .then(async r => {
+        const data = await r.json();
+        if (!r.ok) {
+          console.error("parse_food_text error", data);
+          if (dbg && dbgText) {
+            const docHits = data.doc_rag_hits ?? 0;
+            const usdaHits = data.usda_rag_hits ?? 0;
+            dbg.style.display = "block";
+            dbgText.textContent = `Doc-RAG lines: ${docHits} | USDA AllData lines: ${usdaHits}`;
+          }
+          alert(data.error || "Error parsing text.");
+          return;
+        }
+
         if (data.parsed_food) {
           document.getElementById("parsed-food-output").innerHTML =
             `<pre>${JSON.stringify(data.parsed_food, null, 2)}</pre>`;
@@ -507,11 +571,19 @@
           document.getElementById("manual-calories").value = data.parsed_food.calories || "";
           document.getElementById("manual-micronutrients").value =
             JSON.stringify(data.parsed_food.micronutrients || [], null, 2);
-        } else {
-          alert(data.error || "Error parsing text.");
+        }
+
+        if (dbg && dbgText) {
+          const docHits = data.doc_rag_hits ?? 0;
+          const usdaHits = data.usda_rag_hits ?? 0;
+          dbg.style.display = "block";
+          dbgText.textContent = `Doc-RAG lines: ${docHits} | USDA AllData lines: ${usdaHits}`;
         }
       })
-      .catch(err => console.error("Error parsing food text:", err));
+      .catch(err => {
+        console.error("Error parsing food text:", err);
+        alert("Error parsing text.");
+      });
     }
 
     function manualInputFood() {
@@ -543,18 +615,65 @@
       .catch(err => console.error("Error in manual input:", err));
     }
 
-    // Recipes: create / list / search / open / rename / delete
+    // window selector for recipes
+    (function(){
+      const todayBtn  = document.getElementById('win-today');
+      const weekBtn   = document.getElementById('win-week');
+      const monthBtn  = document.getElementById('win-month');
+      const customBtn = document.getElementById('win-custom');
+      const dateInp   = document.getElementById('win-date');
+
+      function ymdToday(){
+        const d = new Date();
+        return d.toISOString().slice(0,10);
+      }
+
+      function select(btn){
+        [todayBtn, weekBtn, monthBtn, customBtn].forEach(b=> b && b.classList.remove('seg-on'));
+        if(btn) btn.classList.add('seg-on');
+        if(btn === customBtn){
+          if(dateInp) dateInp.style.display = 'inline-block';
+          if(dateInp && !dateInp.value) dateInp.value = ymdToday();
+        }else{
+          if(dateInp) dateInp.style.display = 'none';
+        }
+      }
+
+      [todayBtn, weekBtn, monthBtn, customBtn].forEach(b=>{
+        if(!b) return;
+        b.addEventListener('click', ()=> select(b));
+      });
+
+      window._winState = {
+        getRangeAndDate: function(){
+          const sel = document.querySelector('.seg-btn.seg-on');
+          let range = (sel && sel.getAttribute('data-range')) || 'day';
+          let date  = (sel === customBtn && dateInp && dateInp.value) ? dateInp.value : ymdToday();
+          if(sel === monthBtn) range = 'month';
+          if(sel === weekBtn)  range = 'week';
+          if(sel === todayBtn) range = 'day';
+          return { range, date };
+        }
+      };
+    })();
+
     function createRecipeFromPlaintext() {
       if (!startBusy("btn-generate-recipe", "Generating…")) return;
       const text = document.getElementById("recipe-plaintext").value;
       if (!text) { alert("Please enter a description for the recipe."); endBusy("btn-generate-recipe"); return; }
+
+      const sel = (window._winState && window._winState.getRangeAndDate)
+        ? window._winState.getRangeAndDate()
+        : {range:'day', date: new Date().toISOString().slice(0,10)};
 
       const payload = {
         title: "Generated Recipe",
         ingredients: "",
         micronutrients: [],
         preferences: text,
-        generative: true
+        generative: true,
+        range: sel.range,
+        date: sel.date
       };
 
       fetch('/api/recipes', {
@@ -571,7 +690,49 @@
       .finally(() => endBusy("btn-generate-recipe"));
     }
 
-    function getMyRecipes() {
+    // favorites helpers
+    async function loadFavorites() {
+      try {
+        const r = await fetch('/api/recipes/favorites');
+        if (!r.ok) return;
+        const d = await r.json();
+        favoriteSet = new Set((d.favorites || []).map(x => String(x.id)));
+      } catch (e) {
+        favoriteSet = new Set();
+      }
+    }
+
+    function starHTML(isFav) { return `<span class="star" title="${isFav ? 'Unfavorite' : 'Favorite'}">${isFav ? '★' : '☆'}</span>`; }
+
+    async function toggleFavorite(recipeId, el) {
+      const idStr = String(recipeId);
+      const isFav = favoriteSet.has(idStr);
+      try {
+        if (isFav) {
+          const r = await fetch(`/api/recipes/${encodeURIComponent(recipeId)}/favorite`, { method: 'DELETE' });
+          if (r.ok) favoriteSet.delete(idStr);
+        } else {
+          const r = await fetch(`/api/recipes/${encodeURIComponent(recipeId)}/favorite`, { method: 'POST' });
+          const d = await r.json();
+          if (r.ok && d.ok) favoriteSet.add(idStr);
+        }
+      } catch (e) {}
+      if (el) el.innerHTML = isFav ? '☆' : '★';
+      syncDetailStar();
+    }
+
+    function syncDetailStar() {
+      const panel = document.getElementById("recipe-detail");
+      const id = panel.dataset.recipeId;
+      const star = document.getElementById("detail-star");
+      if (!id || !star) return;
+      const on = favoriteSet.has(String(id));
+      star.textContent = on ? '★' : '☆';
+      star.title = on ? 'Unfavorite' : 'Favorite';
+    }
+
+    async function getMyRecipes() {
+      await loadFavorites();
       fetch('/api/recipes/mine')
         .then(r=>r.json())
         .then(data=>{
@@ -581,11 +742,22 @@
           if (!arr.length) { div.textContent = "No recipes yet."; return; }
 
           arr.forEach(rcp=>{
+            const id = String(rcp.id || rcp.recipe_id);
             const row = document.createElement("div");
             row.style.padding = "6px 0";
             row.style.borderBottom = "1px solid #e6e6e6";
-            row.innerHTML = `<div class="clickable" style="text-align:left;"><strong>${rcp.title}</strong> — ${rcp.created_at || ''}</div>`;
-            row.onclick = () => openRecipe(rcp.id || rcp.recipe_id || rcp);
+
+            const isFav = favoriteSet.has(id);
+            row.innerHTML = `
+              <div class="clickable" style="text-align:left;display:flex;align-items:center;gap:8px;">
+                <strong>${rcp.title}</strong> — ${rcp.created_at || ''}
+                <span class="star" data-id="${id}" title="${isFav ? 'Unfavorite' : 'Favorite'}">${isFav ? '★' : '☆'}</span>
+              </div>
+            `;
+            row.querySelector('strong').onclick = () => openRecipe(id);
+            const starEl = row.querySelector('.star');
+            starEl.onclick = (e) => { e.stopPropagation(); toggleFavorite(id, starEl); };
+
             div.appendChild(row);
           });
         })
@@ -608,7 +780,8 @@
 
       fetch("/api/recipes/search?" + params.toString())
         .then(r => r.json())
-        .then(data => {
+        .then(async data => {
+          await loadFavorites();
           div.innerHTML = "";
           if (data.error) {
             div.textContent = "Error: " + data.error;
@@ -620,11 +793,19 @@
             return;
           }
           arr.forEach(rcp => {
+            const id = String(rcp.id || rcp.recipe_id);
+            const isFav = favoriteSet.has(id);
             const row = document.createElement("div");
             row.style.padding = "6px 0";
             row.style.borderBottom = "1px solid #e6e6e6";
-            row.innerHTML = `<div class="clickable" style="text-align:left;"><strong>${rcp.title}</strong> — ${rcp.created_at || ''}</div>`;
-            row.onclick = () => openRecipe(rcp.id || rcp.recipe_id || rcp);
+            row.innerHTML = `
+              <div class="clickable" style="text-align:left;display:flex;align-items:center;gap:8px;">
+                <strong>${rcp.title}</strong> — ${rcp.created_at || ''}
+                <span class="star" data-id="${id}" title="${isFav ? 'Unfavorite' : 'Favorite'}">${isFav ? '★' : '☆'}</span>
+              </div>`;
+            row.querySelector('strong').onclick = () => openRecipe(id);
+            const starEl = row.querySelector('.star');
+            starEl.onclick = (e) => { e.stopPropagation(); toggleFavorite(id, starEl); };
             div.appendChild(row);
           });
         })
@@ -666,6 +847,7 @@
 
       panel.style.display = "block";
       panel.scrollIntoView({behavior:"smooth", block:"start"});
+      syncDetailStar();
     }
 
     async function openRecipe(idOrObj) {
@@ -681,6 +863,9 @@
           const recipe = d.recipe || d || {};
           recipe.id = recipe.id || id;
           renderRecipeDetail(recipe);
+          const pnl = document.getElementById('recipe-detail');
+          if (pnl) pnl.dataset.recipeId = String(recipe.id || recipe.recipe_id || id || "");
+          syncDetailStar();
           return;
         }
         if (r1.status === 405) throw new Error("405");
@@ -694,7 +879,7 @@
             if (found) { renderRecipeDetail(found); return; }
           }
         } catch (e2) {}
-        alert("Could not open that recipe (endpoint returned 405 and fallback failed).");
+        alert("Could not open that recipe.");
       }
     }
 
@@ -705,7 +890,7 @@
       if (!id) return alert("No recipe selected.");
       if (!newTitle) return alert("Enter a new name first.");
 
-      let ok = false, msg = "";
+      let ok = false;
       try {
         const r = await fetch(`/api/recipes/${encodeURIComponent(id)}/rename`, {
           method: 'POST',
@@ -713,7 +898,6 @@
           body: JSON.stringify({ title: newTitle })
         });
         ok = r.ok;
-        msg = (await r.json()).message || "";
       } catch (e) {}
 
       if (!ok) {
@@ -724,7 +908,6 @@
             body: JSON.stringify({ title: newTitle })
           });
           ok = r.ok;
-          msg = (await r.json()).message || "";
         } catch (e) {}
       }
 
@@ -734,7 +917,7 @@
         if (rti) rti.value = "";
         getMyRecipes();
       } else {
-        alert(msg || "Rename failed (no matching endpoint).");
+        alert("Rename failed.");
       }
     }
 
@@ -749,9 +932,7 @@
         return;
       }
 
-      fetch(`/api/recipes/${encodeURIComponent(rid)}`, {
-        method: "DELETE"
-      })
+      fetch(`/api/recipes/${encodeURIComponent(rid)}`, { method: "DELETE" })
       .then(r => r.json())
       .then(d => {
         if (d.ok) {
@@ -777,44 +958,6 @@
       if (rti) rti.value = "";
     }
 
-    // Image scan
-    function scanFoodImage() {
-      const file = document.getElementById("food-image").files[0];
-      if (!file) return alert("Please select an image file.");
-      if (!startBusy("btn-image-scan", "Scanning…")) return;
-
-      const formData = new FormData();
-      formData.append("file", file);
-      fetch('/scan_food_image', { method: 'POST', body: formData })
-        .then(r => r.json())
-        .then(data => {
-          const resultsDiv = document.getElementById("image-scan-results");
-          resultsDiv.style.display = "block";
-          resultsDiv.innerHTML = "";
-          if (data.detected_foods) {
-            data.detected_foods.forEach(food => {
-              const div = document.createElement("div");
-              div.innerHTML = `<strong>${food.food_name}</strong> - Confidence: ${(food.confidence * 100).toFixed(0)}%<br>
-                               Bounding Box: [${food.bounding_box}]`;
-              resultsDiv.appendChild(div);
-            });
-          } else {
-            resultsDiv.innerText = "No food detected.";
-          }
-          if (data.llm_response) {
-            const llamaDiv = document.createElement("div");
-            llamaDiv.innerHTML = `<strong>Model Response:</strong><br>${data.llm_response}`;
-            resultsDiv.appendChild(llamaDiv);
-          }
-        })
-        .catch(err => {
-          console.error("Error scanning image:", err);
-          alert("Error scanning image.");
-        })
-        .finally(() => endBusy("btn-image-scan"));
-    }
-
-    // Saved foods list
     function getMyFoods() {
       fetch('/my_foods')
       .then(r => r.json())
@@ -838,9 +981,79 @@
       .catch(err => console.error("Error fetching saved foods:", err));
     }
 
-    // initial load
+    function scanFoodImage() {
+      const input = document.getElementById("food-image");
+      const file = input.files[0];
+      if (!file) {
+        alert("Please choose an image file first.");
+        return;
+      }
+      if (!startBusy("btn-image-scan", "Scanning…")) return;
+
+      const formData = new FormData();
+      formData.append("file", file);
+
+      fetch("/scan_food_image", {
+        method: "POST",
+        body: formData
+      })
+      .then(r => r.json())
+      .then(data => {
+        const div = document.getElementById("image-scan-results");
+        if (data.error) {
+          div.textContent = "Error: " + data.error;
+          return;
+        }
+        div.innerHTML = `<pre>${JSON.stringify(data, null, 2)}</pre>`;
+      })
+      .catch(err => {
+        console.error("scanFoodImage error", err);
+        alert("Image scan failed.");
+      })
+      .finally(() => endBusy("btn-image-scan"));
+    }
+
+    // Nutrition Q&A chat using /ask
+    function askNutrition() {
+      const q = document.getElementById('chat-question').value.trim();
+      const out = document.getElementById('chat-answer');
+      if (!q) {
+        alert("Please enter a question.");
+        return;
+      }
+      if (!startBusy("btn-chat", "Thinking…")) return;
+      out.innerHTML = "Asking…";
+
+      fetch('/ask', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ question: q })
+      })
+      .then(r => r.json())
+      .then(d => {
+        if (d.error) {
+          out.textContent = d.error;
+          return;
+        }
+        const ans = d.answer || "(no answer returned)";
+        out.innerHTML = `<strong>Answer:</strong><br><pre>${ans}</pre>`;
+      })
+      .catch(err => {
+        console.error("askNutrition error", err);
+        out.textContent = "Error asking the model.";
+      })
+      .finally(() => endBusy("btn-chat"));
+    }
+
     getMyFoods();
     getMyRecipes();
+
+    document.getElementById('detail-star').onclick = function(){
+      const panel = document.getElementById('recipe-detail');
+      const id = panel.dataset.recipeId;
+      if (!id) return;
+      toggleFavorite(id, this);
+    };
   </script>
 </body>
 </html>
